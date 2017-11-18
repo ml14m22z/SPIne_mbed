@@ -1,23 +1,30 @@
 
-#define CAN_ID 0x1
+#define CAN_ID 0x0
 
 #include "mbed.h"
 #include "math_ops.h"
 
 
 Serial       pc(PA_2, PA_3);
-CAN          can(PB_8, PB_9);  // CAN Rx pin name, CAN Tx pin name
-CANMessage   rxMsg;
-CANMessage   txMsg1;
-CANMessage    txMsg2;
+CAN          can1(PB_8, PB_9);  // CAN Rx pin name, CAN Tx pin name
+CAN          can2(PB_5, PB_13);  // CAN Rx pin name, CAN Tx pin name
+CANMessage   rxMsg1, rxMsg2;
+CANMessage   abad1, abad2, hip1, hip2, knee1, knee2;    //TX Messages
 int                     ledState;
-Timer                   timer;
 Ticker                  sendCAN;
 int                     counter = 0;
 volatile bool           msgAvailable = false;
 Ticker loop;
 
- float theta1, theta2, dtheta1, dtheta2;
+///[[abad1,  abad2]
+///[hip1,   hip2]
+///[knee1, knee2]]
+float q[3][2];   //Joint states for both legs
+float dq[3][2];
+float tau[3][3];
+float kp = 60;
+float kd = 0.8;
+int enabled = 0;
 
 /// Value Limits ///
  #define P_MIN -12.5f
@@ -85,7 +92,7 @@ void pack_cmd(CANMessage * msg, float p_des, float v_des, float kp, float kd, fl
 /// 3: [velocity[3-0], current[11-8]]
 /// 4: [current[7-0]]
 
-void unpack_reply(CANMessage msg){
+void unpack_reply(CANMessage msg, int leg_num){
     /// unpack ints from can buffer ///
     int id = msg.data[0];
     int p_int = (msg.data[1]<<8)|msg.data[2];
@@ -94,8 +101,11 @@ void unpack_reply(CANMessage msg){
     /// convert ints to floats ///
     float p = uint_to_float(p_int, P_MIN, P_MAX, 16);
     float v = uint_to_float(v_int, V_MIN, V_MAX, 12);
-    float i = uint_to_float(i_int, -I_MAX, I_MAX, 12);
+    float t = uint_to_float(i_int, -T_MAX, T_MAX, 12);
     
+    q[id-1][leg_num] = p;
+    dq[id-1][leg_num] = v;
+    /*
     if(id == 2){
         theta1 = p;
         dtheta1 = v;
@@ -104,93 +114,160 @@ void unpack_reply(CANMessage msg){
         theta2 = p;
         dtheta2 = v;
         }
+        */
     
+    //printf("%d  %.3f   %.3f   %.3f\n\r", id, p, v, i);
     } 
     
- void onMsgReceived() {
-    can.read(rxMsg);                    // read message into Rx message storage
-    unpack_reply(rxMsg);
+ void rxISR1() {
+    can1.read(rxMsg1);                    // read message into Rx message storage
+    unpack_reply(rxMsg1, 0);
 }
+void rxISR2(){
+    can2.read(rxMsg2);
+    unpack_reply(rxMsg2, 1);
+    }
 
+void WriteAll(){
+    can1.write(abad1);
+    wait(.0001);
+    can2.write(abad2);
+    wait(.0001);
+    can1.write(hip1);
+    wait(.0001);
+    can2.write(hip2);
+    wait(.0001);
+    can1.write(knee1);
+    wait(.0001);
+    can2.write(knee2);
+    wait(.0001);
+    }
 
 void sendCMD(){
     /// bilateral teleoperation demo ///
-    pack_cmd(&txMsg1, theta2, dtheta2, 10, .1, 0); 
-    pack_cmd(&txMsg2, theta1, dtheta1, 10, .1, 0);
-    can.write(txMsg2);
-    wait(.0003);        // Give motor 1 time to respond.
-    can.write(txMsg1);
+    counter ++;
+    
+    if(enabled){
+        if(counter>100){
+            //tcmd = -1*tcmd;
+            //printf("%.4f   %.4f   %.4f     %.4f   %.4f   %.4f\n\r", q[0][0], q[1][0], q[2][0], q[0][1], q[1][1], q[2][1]);
+            counter = 0 ;
+            }
+            
+        tau[0][1] = kp*(q[0][0] - q[0][1]) + kd*(dq[0][0] - dq[0][1]);
+        tau[0][0] = kp*(q[0][1] - q[0][0]) + kd*(dq[0][1] - dq[0][0]);
+        tau[1][1] = kp*(q[1][0] - q[1][1]) + kd*(dq[1][0] - dq[1][1]);
+        tau[1][0] = kp*(q[1][1] - q[1][0]) + kd*(dq[1][1] - dq[1][0]);
+        tau[2][1] = (kp/1.5f)*(q[2][0] - q[2][1]) + (kd/2.25f)*(dq[2][0] - dq[2][1]);
+        tau[2][0] = (kp/1.5f)*(q[2][1] - q[2][0]) + (kd/2.25f)*(dq[2][1] - dq[2][0]);
+        
+        pack_cmd(&abad1, 0, 0, 0, .01, tau[0][0]); 
+        pack_cmd(&abad2, 0, 0, 0, .01, tau[0][1]); 
+        pack_cmd(&hip1, 0, 0, 0, .01, tau[1][0]); 
+        pack_cmd(&hip2, 0, 0, 0, .01, tau[1][1]); 
+        pack_cmd(&knee1, 0, 0, 0, .006, tau[2][0]); 
+        pack_cmd(&knee2, 0, 0, 0, .006, tau[2][1]); 
+        /*
+        pack_cmd(&abad1, q[0][1], dq[0][1], kp, kd, 0); 
+        pack_cmd(&abad2, q[0][0], dq[0][0], kp, kd, 0); 
+        pack_cmd(&hip1, q[1][1], dq[1][1], kp, kd, 0); 
+        pack_cmd(&hip2, q[1][0], dq[1][0], kp, kd, 0); 
+        pack_cmd(&knee1, q[2][1], dq[2][1], kp/1.5f, kd/2.25f, 0); 
+        pack_cmd(&knee2, q[2][0], dq[2][0], kp/1.5f, kd/2.25f, 0); 
+        */
+    }
+/*
+    pack_cmd(&abad1, 0, 0, 10, .1, 0); 
+    pack_cmd(&abad2, 0, 0, 10, .1, 0); 
+    pack_cmd(&hip1, 0, 0, 10, .1, 0); 
+    pack_cmd(&hip2, 0, 0, 10, .1, 0); 
+    pack_cmd(&knee1, 0, 0, 6.6, .04, 0); 
+    pack_cmd(&knee2, 0, 0, 6.6, .04, 0); 
+*/    
+    WriteAll();
     }
     
+void Zero(CANMessage * msg){
+    msg->data[0] = 0xFF;
+    msg->data[1] = 0xFF;
+    msg->data[2] = 0xFF;
+    msg->data[3] = 0xFF;
+    msg->data[4] = 0xFF;
+    msg->data[5] = 0xFF;
+    msg->data[6] = 0xFF;
+    msg->data[7] = 0xFE;
+    WriteAll();
+    }
+
+void EnterMotorMode(CANMessage * msg){
+    msg->data[0] = 0xFF;
+    msg->data[1] = 0xFF;
+    msg->data[2] = 0xFF;
+    msg->data[3] = 0xFF;
+    msg->data[4] = 0xFF;
+    msg->data[5] = 0xFF;
+    msg->data[6] = 0xFF;
+    msg->data[7] = 0xFC;
+    WriteAll();
+    }
+    
+void ExitMotorMode(CANMessage * msg){
+    msg->data[0] = 0xFF;
+    msg->data[1] = 0xFF;
+    msg->data[2] = 0xFF;
+    msg->data[3] = 0xFF;
+    msg->data[4] = 0xFF;
+    msg->data[5] = 0xFF;
+    msg->data[6] = 0xFF;
+    msg->data[7] = 0xFD;
+    WriteAll();
+    }
 void serial_isr(){
-     /// hangle keyboard commands from the serial terminal ///
+     /// handle keyboard commands from the serial terminal ///
      while(pc.readable()){
         char c = pc.getc();
         switch(c){
             case(27):
+                loop.detach();
                 printf("\n\r exiting motor mode \n\r");
-                txMsg1.data[0] = 0xFF;
-                txMsg1.data[1] = 0xFF;
-                txMsg1.data[2] = 0xFF;
-                txMsg1.data[3] = 0xFF;
-                txMsg1.data[4] = 0xFF;
-                txMsg1.data[5] = 0xFF;
-                txMsg1.data[6] = 0xFF;
-                txMsg1.data[7] = 0xFD;
-                
-                txMsg2.data[0] = 0xFF;
-                txMsg2.data[1] = 0xFF;
-                txMsg2.data[2] = 0xFF;
-                txMsg2.data[3] = 0xFF;
-                txMsg2.data[4] = 0xFF;
-                txMsg2.data[5] = 0xFF;
-                txMsg2.data[6] = 0xFF;
-                txMsg2.data[7] = 0xFD;
+                ExitMotorMode(&abad1);
+                ExitMotorMode(&abad2);
+                ExitMotorMode(&hip1);
+                ExitMotorMode(&hip2);
+                ExitMotorMode(&knee1);
+                ExitMotorMode(&knee2);
+                enabled = 0;
                 break;
             case('m'):
                 printf("\n\r entering motor mode \n\r");
-                txMsg1.data[0] = 0xFF;
-                txMsg1.data[1] = 0xFF;
-                txMsg1.data[2] = 0xFF;
-                txMsg1.data[3] = 0xFF;
-                txMsg1.data[4] = 0xFF;
-                txMsg1.data[5] = 0xFF;
-                txMsg1.data[6] = 0xFF;
-                txMsg1.data[7] = 0xFC;
-                
-                txMsg2.data[0] = 0xFF;
-                txMsg2.data[1] = 0xFF;
-                txMsg2.data[2] = 0xFF;
-                txMsg2.data[3] = 0xFF;
-                txMsg2.data[4] = 0xFF;
-                txMsg2.data[5] = 0xFF;
-                txMsg2.data[6] = 0xFF;
-                txMsg2.data[7] = 0xFC;
+                EnterMotorMode(&abad1);
+                Zero(&abad1);
+                EnterMotorMode(&abad2);
+                Zero(&abad2);
+                EnterMotorMode(&hip1);
+                Zero(&hip1);
+                EnterMotorMode(&hip2);
+                Zero(&hip2);
+                EnterMotorMode(&knee1);
+                Zero(&knee1);
+                EnterMotorMode(&knee2);
+                Zero(&knee2);
+                wait(.5);
+                enabled = 1;
+                loop.attach(&sendCMD, .001);
                 break;
             case('z'):
                 printf("\n\r zeroing \n\r");
-                txMsg1.data[0] = 0xFF;
-                txMsg1.data[1] = 0xFF;
-                txMsg1.data[2] = 0xFF;
-                txMsg1.data[3] = 0xFF;
-                txMsg1.data[4] = 0xFF;
-                txMsg1.data[5] = 0xFF;
-                txMsg1.data[6] = 0xFF;
-                txMsg1.data[7] = 0xFE;
-                
-                txMsg2.data[0] = 0xFF;
-                txMsg2.data[1] = 0xFF;
-                txMsg2.data[2] = 0xFF;
-                txMsg2.data[3] = 0xFF;
-                txMsg2.data[4] = 0xFF;
-                txMsg2.data[5] = 0xFF;
-                txMsg2.data[6] = 0xFF;
-                txMsg2.data[7] = 0xFE;
+                Zero(&abad1);
+                Zero(&abad2);
+                Zero(&hip1);
+                Zero(&hip2);
+                Zero(&knee1);
+                Zero(&knee2);
                 break;
             }
         }
-        can.write(txMsg1);
-        can.write(txMsg2);
+        WriteAll();
         
     }
     
@@ -198,21 +275,38 @@ int can_packet[8] = {1, 2, 3, 4, 5, 6, 7, 8};
 int main() {
     pc.baud(921600);
     pc.attach(&serial_isr);
-    can.frequency(1000000);                     // set bit rate to 1Mbps
-    can.attach(&onMsgReceived);                 // attach 'CAN receive-complete' interrupt handler
-    can.filter(CAN_ID<<21, 0xFFE00004, CANStandard, 0); //set up can filter
-    printf("Master\n\r");
+    can1.frequency(1000000);                     // set bit rate to 1Mbps
+    can1.attach(&rxISR1);                 // attach 'CAN receive-complete' interrupt handler
+    can1.filter(CAN_ID<<21, 0xFFE00004, CANStandard, 0); //set up can filter
+    can2.frequency(1000000);                     // set bit rate to 1Mbps
+    can2.attach(&rxISR2);                 // attach 'CAN receive-complete' interrupt handler
+    can2.filter(CAN_ID<<21, 0xFFE00004, CANStandard, 0); //set up can filter
+    
+    printf("\n\r Master\n\r");
     //printf("%d\n\r", RX_ID << 18);
-    int count = 0;
-    txMsg1.len = 8;                         //transmit 8 bytes
-    txMsg2.len = 8;                         //transmit 8 bytes
-    rxMsg.len = 6;                          //receive 5 bytes
-    loop.attach(&sendCMD, .001);
-    txMsg1.id = 0x2;                        //1st motor ID
-    txMsg2.id = 0x3;                        //2nd motor ID
-    pack_cmd(&txMsg1, 0, 0, 0, 0, 0);       //Start out by sending all 0's
-    pack_cmd(&txMsg2, 0, 0, 0, 0, 0);
-    timer.start();
+    abad1.len = 8;                         //transmit 8 bytes
+    abad2.len = 8;                         //transmit 8 bytes
+    hip1.len = 8;
+    hip2.len = 8;
+    knee1.len = 8;
+    knee2.len = 8;
+    rxMsg1.len = 6;                          //receive 5 bytes
+    rxMsg2.len = 6;                          //receive 5 bytes
+
+    
+    abad1.id = 0x1;                        
+    abad2.id = 0x1;                 
+    hip1.id = 0x2;
+    hip2.id = 0x2;
+    knee1.id = 0x3;
+    knee2.id = 0x3;       
+    pack_cmd(&abad1, 0, 0, 0, 0, 0);       //Start out by sending all 0's
+    pack_cmd(&abad2, 0, 0, 0, 0, 0);
+    pack_cmd(&hip1, 0, 0, 0, 0, 0);
+    pack_cmd(&hip2, 0, 0, 0, 0, 0);
+    pack_cmd(&knee1, 0, 0, 0, 0, 0);
+    pack_cmd(&knee2, 0, 0, 0, 0, 0);
+    
     
     while(1) {
 
