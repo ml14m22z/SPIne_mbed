@@ -1,130 +1,93 @@
 
-#define CAN_ID 0x0
 
 #include "mbed.h"
 #include "math_ops.h"
+#include <cstring>
+#include "leg_message.h"
 
+// length of receive/transmit buffers
+#define RX_LEN 66
+#define TX_LEN 66
 
-Serial       pc(PA_2, PA_3);
-CAN          can1(PB_8, PB_9);  // CAN Rx pin name, CAN Tx pin name
-CAN          can2(PB_5, PB_13);  // CAN Rx pin name, CAN Tx pin name
-CANMessage   rxMsg1, rxMsg2;
-CANMessage   abad1, abad2, hip1, hip2, knee1, knee2;    //TX Messages
-int                     ledState;
-Ticker                  sendCAN;
-int                     counter = 0;
-volatile bool           msgAvailable = false;
-Ticker loop;
-AnalogIn     knob(PC_0);
-DigitalOut  toggle(PC_3);
-DigitalOut  toggle2(PC_2);
+// length of outgoing/incoming messages
+#define DATA_LEN 30
+#define CMD_LEN  66
 
-///[[abad1,  abad2]
-///[hip1,   hip2]
-///[knee1, knee2]]
-float q1raw[3];
-float q2raw[3];
-float dq1raw[3];
-float dq2raw[3];
-float q1[3];    //Leg 1 joint angles
-float dq1[3];   //Leg 1 joint velocities
-float tau1[3];  //Leg 1 joint torques
-float q2[3];    //Leg 2 joint angles
-float dq2[3];   //Leg 2 joint velocities
-float tau2[3];  //Leg 2 joint torques
-float p1[3];    //Leg 1 end effector position
-float v1[3];    //Leg 1 end effector velocity
-float J1[3][3]; //Leg 1 Jacobian
-float f1[3];    //Leg 1 end effector forces
-float p2[3];    //Leg 2 end effector position
-float v2[3];    //Leg 2 end effector velocity
-float J2[3][3]; //Leg 2 Jacobian
-float f2[3];    //Leg 2 end effector forces
+// Master CAN ID ///
+#define CAN_ID 0x0
 
-float q[3][2];   //Joint states for both legs
-float dq[3][2];
-float tau[3][3];
-
-float I[3] = {0.005f, 0.0045f, 0.006f}; //Joint space inertias
-float M1[3][3]; //Leg 1 end effector inverse mass
-float M2[3][3]; //Leg 2 end effector inverse mass
-float KD1[3]; //Joint space damping
-float KD2[3];
-float contact1[3];
-float contact2[3];
-
-const float offset[3] = {0.0f, 3.493f, -2.766f}; //Joint angle offsets at zero position
-
-float kp = 800.0f;
-float kd = 100.0f;
-float kp_q = 100.0f;
-float kd_q = 0.8f;
-int enabled = 0;
-float scaling = 0;
-
-
-int control_mode = 0;
 
 /// Value Limits ///
  #define P_MIN -12.5f
  #define P_MAX 12.5f
- #define V_MIN -30.0f
- #define V_MAX 30.0f
+ #define V_MIN -45.0f
+ #define V_MAX 45.0f
  #define KP_MIN 0.0f
  #define KP_MAX 500.0f
  #define KD_MIN 0.0f
  #define KD_MAX 5.0f
  #define T_MIN -18.0f
  #define T_MAX 18.0f
- #define I_MAX 40.0f
  
- #define L1 0.0577f
- #define L2 0.2088f
- #define L3 0.175f
- 
- void kinematics(const float q[3], const float dq[3], float* p, float* v, float (* J)[3], float (* M)[3]){
-     const float s1 = sinf(q[0]);
-     const float s2 = sinf(q[1]);
-     const float s3 = sinf(q[2]);
-     const float c1 = cosf(q[0]);
-     const float c2 = cosf(q[1]);
-     const float c3 = cosf(q[2]);
-     
-     const float c23 = c2*c3 - s2*s3;
-     const float s23 = s2*c3 + c2*s3;
-     
-     p[0] = L3*s23 + L2*s2;
-     p[1] = L1*c1 + L3*s1*c23 + L2*c2*s1;
-     p[2] = L1*s1 - L3*c1*c23 - L2*c1*c2;
-     
-     J[0][0] = 0;
-     J[0][1] = L3*c23 + L2*c2;
-     J[0][2] = L3*c23;
-     J[1][0] = L3*c1*c23 + L2*c1*c2 - L1*s1;
-     J[1][1] = -L3*s1*s23 - L2*s1*s2;
-     J[1][2] = -L3*s1*s23;
-     J[2][0] = L3*s1*c23 + L2*c2*s1 + L1*c1;
-     J[2][1] = L3*c1*s23 + L2*c1*s2;
-     J[2][2] = L3*c1*s23;
-     
-     M[0][0] = J[0][0]*J[0][0]/I[0] + J[0][1]*J[0][1]/I[1] + J[0][2]*J[0][2]/I[2];
-     M[0][1] = 0;
-     M[0][2] = 0;
-     M[1][0] = 0;
-     M[1][1] = J[1][0]*J[1][0]/I[0] + J[1][1]*J[1][1]/I[1] + J[1][2]*J[1][2]/I[2];
-     M[1][2] = 0;
-     M[2][0] = 0;
-     M[2][1] = 0;
-     M[2][2] = J[2][0]*J[2][0]/I[0] + J[2][1]*J[2][1]/I[1] + J[2][2]*J[2][2]/I[2];
-     
-     v[0] = 0; v[1] = 0; v[2] = 0;
-     for(int i = 0; i<3; i++){
-         for(int j = 0; j<3; j++){
-             v[i] += J[i][j]*dq[j];
-             }
-            }
-     }
- 
+ /// Joint Soft Stops ///
+ #define A_LIM_P 1.5f
+ #define A_LIM_N -1.5f
+ #define H_LIM_P 5.0f
+ #define H_LIM_N -5.0f
+ #define K_LIM_P 0.2f
+ #define K_LIM_N 7.7f
+ #define KP_SOFTSTOP 100.0f
+ #define KD_SOFTSTOP 0.4f;
+
+#define ENABLE_CMD 0xFFFF
+#define DISABLE_CMD 0x1F1F
+
+spi_data_t spi_data; // data from spine to up
+spi_command_t spi_command; // data from up to spine
+
+// spi buffers
+uint16_t rx_buff[RX_LEN];
+uint16_t tx_buff[TX_LEN];
+
+DigitalOut led(PC_5);
+
+
+Serial       pc(PA_2, PA_3);
+CAN          can1(PB_12, PB_13);  // CAN Rx pin name, CAN Tx pin name
+CAN          can2(PB_8, PB_9);  // CAN Rx pin name, CAN Tx pin name
+
+CANMessage   rxMsg1, rxMsg2;
+CANMessage   txMsg1, txMsg2;
+CANMessage   a1_can, a2_can, h1_can, h2_can, k1_can, k2_can;    //TX Messages
+int                     ledState;
+Ticker                  sendCAN;
+int                     counter = 0;
+volatile bool           msgAvailable = false;
+Ticker loop;
+
+int spi_enabled = 0;
+InterruptIn cs(PA_4);
+DigitalIn estop(PA_14);
+//SPISlave spi(PA_7, PA_6, PA_5, PA_4);
+
+
+leg_state l1_state, l2_state;;
+leg_control l1_control, l2_control;
+
+uint16_t x = 0;
+uint16_t x2 = 0;
+uint16_t count = 0;
+uint16_t counter2 = 0;
+
+int control_mode = 1;
+int is_standing = 0;
+int enabled = 0;
+
+ // generates fake spi data from spi command
+void test_control();
+void control();
+
+
 /// CAN Command Packet Structure ///
 /// 16 bit position command, between -4*pi and 4*pi
 /// 12 bit velocity command, between -30 and + 30 rad/s
@@ -142,20 +105,20 @@ int control_mode = 0;
 /// 6: [kd[3-0], torque[11-8]]
 /// 7: [torque[7-0]]
 
-void pack_cmd(CANMessage * msg, float p_des, float v_des, float kp, float kd, float t_ff){
+void pack_cmd(CANMessage * msg, joint_control joint){
      
      /// limit data to be within bounds ///
-     p_des = fminf(fmaxf(P_MIN, p_des), P_MAX);                    
-     v_des = fminf(fmaxf(V_MIN, v_des), V_MAX);
-     kp = fminf(fmaxf(KP_MIN, kp), KP_MAX);
-     kd = fminf(fmaxf(KD_MIN, kd), KD_MAX);
-     t_ff = fminf(fmaxf(T_MIN, t_ff), T_MAX);
+     float p_des = fminf(fmaxf(P_MIN, joint.p_des), P_MAX);                    
+     float v_des = fminf(fmaxf(V_MIN, joint.v_des), V_MAX);
+     float kp = fminf(fmaxf(KP_MIN, joint.kp), KP_MAX);
+     float kd = fminf(fmaxf(KD_MIN, joint.kd), KD_MAX);
+     float t_ff = fminf(fmaxf(T_MIN, joint.t_ff), T_MAX);
      /// convert floats to unsigned ints ///
-     int p_int = float_to_uint(p_des, P_MIN, P_MAX, 16);            
-     int v_int = float_to_uint(v_des, V_MIN, V_MAX, 12);
-     int kp_int = float_to_uint(kp, KP_MIN, KP_MAX, 12);
-     int kd_int = float_to_uint(kd, KD_MIN, KD_MAX, 12);
-     int t_int = float_to_uint(t_ff, T_MIN, T_MAX, 12);
+     uint16_t p_int = float_to_uint(p_des, P_MIN, P_MAX, 16);            
+     uint16_t v_int = float_to_uint(v_des, V_MIN, V_MAX, 12);
+     uint16_t kp_int = float_to_uint(kp, KP_MIN, KP_MAX, 12);
+     uint16_t kd_int = float_to_uint(kd, KD_MIN, KD_MAX, 12);
+     uint16_t t_int = float_to_uint(t_ff, T_MIN, T_MAX, 12);
      /// pack ints into the can buffer ///
      msg->data[0] = p_int>>8;                                       
      msg->data[1] = p_int&0xFF;
@@ -179,234 +142,84 @@ void pack_cmd(CANMessage * msg, float p_des, float v_des, float kp, float kd, fl
 /// 3: [velocity[3-0], current[11-8]]
 /// 4: [current[7-0]]
 
-void unpack_reply(CANMessage msg, int leg_num){
+void unpack_reply(CANMessage msg, leg_state * leg){
     /// unpack ints from can buffer ///
-    int id = msg.data[0];
-    int p_int = (msg.data[1]<<8)|msg.data[2];
-    int v_int = (msg.data[3]<<4)|(msg.data[4]>>4);
-    int i_int = ((msg.data[4]&0xF)<<8)|msg.data[5];
-    /// convert ints to floats ///
+    uint16_t id = msg.data[0];
+    uint16_t p_int = (msg.data[1]<<8)|msg.data[2];
+    uint16_t v_int = (msg.data[3]<<4)|(msg.data[4]>>4);
+    uint16_t i_int = ((msg.data[4]&0xF)<<8)|msg.data[5];
+    /// convert uints to floats ///
     float p = uint_to_float(p_int, P_MIN, P_MAX, 16);
     float v = uint_to_float(v_int, V_MIN, V_MAX, 12);
     float t = uint_to_float(i_int, -T_MAX, T_MAX, 12);
-    float qraw = p;
-    float vraw = v;
-    if(id==3){  //Extra belt 28:18 belt reduction on the knees;
-        p = -p*0.643f;
-        v = -v*0.643f;
-        }
-    else if(id==1){
-        p = -p;
-        v = -v;
-        }
-    p = p+offset[id-1];
-    if(leg_num == 0){
-        q1raw[id-1] = qraw;
-        dq1raw[id-1] = vraw;
-        q1[id-1] = p;
-        dq1[id-1] = v;
-        }
-    else if(leg_num==1){
-        q2raw[id-1] = qraw;
-        dq2raw[id-1] = vraw;
-        q2[id-1] = p;
-        dq2[id-1] = v;
-        }
     
-    /*
-    if(id == 2){
-        theta1 = p;
-        dtheta1 = v;
+    if(id==1){
+        leg->a.p = p;
+        leg->a.v = v;
+        leg->a.t = t;
         }
-    else if(id ==3){
-        theta2 = p;
-        dtheta2 = v;
+    else if(id==2){
+        leg->h.p = p;
+        leg->h.v = v;
+        leg->h.t = t;
         }
-        */
-    
-    //printf("%d  %.3f   %.3f   %.3f\n\r", id, p, v, i);
+    else if(id==3){
+        leg->k.p = p;
+        leg->k.v = v;
+        leg->k.t = t;
+        }
     } 
-    
+
  void rxISR1() {
     can1.read(rxMsg1);                    // read message into Rx message storage
-    unpack_reply(rxMsg1, 0);
+    unpack_reply(rxMsg1, &l1_state);
 }
 void rxISR2(){
     can2.read(rxMsg2);
-    unpack_reply(rxMsg2, 1);
+    unpack_reply(rxMsg2, &l2_state);
     }
-
+void PackAll(){
+    pack_cmd(&a1_can, l1_control.a); 
+    pack_cmd(&a2_can, l2_control.a); 
+    pack_cmd(&h1_can, l1_control.h); 
+    pack_cmd(&h2_can, l2_control.h); 
+    pack_cmd(&k1_can, l1_control.k); 
+    pack_cmd(&k2_can, l2_control.k); 
+    
+    }
 void WriteAll(){
     //toggle = 1;
-    can1.write(abad1);
-    wait(.0001);
-    can2.write(abad2);
-    wait(.0001);
-    can1.write(hip1);
-    wait(.0001);
-    can2.write(hip2);
-    wait(.0001);
-    can1.write(knee1);
-    wait(.0001);
-    can2.write(knee2);
-    wait(.0001);
+    can1.write(a1_can);
+    wait(.00002);
+    can2.write(a2_can);
+    wait(.00002);
+    can1.write(h1_can);
+    wait(.00002);
+    can2.write(h2_can);
+    wait(.00002);
+    can1.write(k1_can);
+    wait(.00002);
+    can2.write(k2_can);
+    wait(.00002);
     //toggle = 0;
     }
 
 void sendCMD(){
-    /// bilateral teleoperation demo ///
-    toggle2 = 1;
     counter ++;
-    scaling = .99f*scaling + .01f*knob.read();
-    
-    kinematics(q1, dq1, p1, v1, J1, M1);
-    kinematics(q2, dq2, p2, v2, J2, M2);
-    
-    if(enabled){
-            switch(control_mode){
-                case 0:
-                    {
-                    KD1[0] = 0;  KD1[1] = 0;  KD1[2] = 0;
-                    KD2[0] = 0;  KD2[1] = 0;  KD2[2] = 0;
-                    tau1[0] = 0; tau1[1] = 0; tau1[2] = 0;
-                    tau2[0] = 0; tau2[1] = 0; tau2[2] = 0;
-                    pack_cmd(&abad1, 0, 0, 0, 0, 0); 
-                    pack_cmd(&abad2, 0, 0, 0, 0, 0); 
-                    pack_cmd(&hip1, 0, 0, 0, 0, 0); 
-                    pack_cmd(&hip2, 0, 0, 0, 0, 0); 
-                    pack_cmd(&knee1, 0, 0, 0, 0, 0); 
-                    pack_cmd(&knee2, 0, 0, 0, 0, 0); 
-                    }
-                    break;
-                case 1:
-                {
-                    //Joint Coupling
-                    KD1[0] = 0;  KD1[1] = 0;  KD1[2] = 0;
-                    KD2[0] = 0;  KD2[1] = 0;  KD2[2] = 0;
-                    tau1[0] = -scaling*(kp_q*(q2[0] - q1[0]) + kd_q*(dq2[0] - dq1[0]));
-                    tau2[0] = -scaling*(kp_q*(q1[0] - q2[0]) + kd_q*(dq1[0] - dq2[0]));
-                    tau1[1] = scaling*(kp_q*(q2[1] - q1[1]) + kd_q*(dq2[1] - dq1[1]));
-                    tau2[1] = scaling*(kp_q*(q1[1] - q2[1]) + kd_q*(dq1[1] - dq2[1]));
-                    tau1[2] = -scaling*((kp_q/1.5f)*(q2[2] - q1[2]) + (kd_q/2.25f)*(dq2[2] - dq1[2]));
-                    tau2[2] = -scaling*((kp_q/1.5f)*(q1[2] - q2[2]) + (kd_q/2.25f)*(dq1[2] - dq2[2]));
-                    
-                    pack_cmd(&abad1, 0, 0, 0, KD1[0]+.005f, tau1[0]); 
-                    pack_cmd(&abad2, 0, 0, 0, KD2[0]+.005f, tau2[0]); 
-                    pack_cmd(&hip1, 0, 0, 0, KD1[1]+.005f, tau1[1]); 
-                    pack_cmd(&hip2, 0, 0, 0, KD2[1]+.005f, tau2[1]); 
-                    pack_cmd(&knee1, 0, 0, 0, KD1[2]+.0033f, tau1[2]); 
-                    pack_cmd(&knee2, 0, 0, 0, KD2[2]+.0033f, tau2[2]); 
-                    }
-                    break;
-                
-                case 2:
-                {
-                    //Virtual Walls
-                    const float kmax = 25000.0f;
-                    const float wn_des = 100000.0f;
-                    const float xlim = 0.0f;
-                    const float ylim = 0.2f;
-                    const float zlim = -.2f;
-                    
-                    contact1[0] = p1[0]<xlim;
-                    contact2[0] = p2[0]<xlim;
-                    contact1[1] = p1[1]>ylim;
-                    contact2[1] = p2[1]>ylim;
-                    contact1[2] = p1[2]<zlim;
-                    contact2[2] = p2[2]<zlim;
-                    
-                    float kx1 = wn_des/M1[0][0];
-                    float kx2 = wn_des/M2[0][0];
-                    kx1 = fminf(kmax, kx1);
-                    kx2 = fminf(kmax, kx2);
-                    f1[0] = scaling*(kx1*(xlim - p1[0]) + 0.0f*kd*(0 - v1[0]))*contact1[0];
-                    f2[0] = scaling*(kx2*(xlim - p2[0]) + 0.0f*kd*(0 - v2[0]))*contact2[0];
-                    
-                    float ky1 = wn_des/M1[1][1];
-                    float ky2 = wn_des/M2[1][1];
-                    ky1 = fminf(kmax, ky1);
-                    ky2 = fminf(kmax, ky2);
-                    f1[1] = scaling*(ky1*(ylim - p1[1]) + 0.0f*kd*(0 - v1[1]))*contact1[1];
-                    f2[1] = scaling*(ky2*(ylim - p2[1]) + 0.0f*kd*(0 - v2[1]))*contact2[1];
-                    
-                    float kz1 = wn_des/M1[2][2];
-                    float kz2 = wn_des/M2[2][2];
-                    kz1 = fminf(kmax, kz1);
-                    kz2 = fminf(kmax, kz2);
-                    f1[2] = scaling*(kz1*(zlim - p1[2]) + 0.0f*kd*(0 - v1[2]))*contact1[2];
-                    f2[2] = scaling*(kz2*(zlim - p2[2]) + 0.0f*kd*(0 - v2[2]))*contact2[2];
-                    //
-                    
-                    tau1[0] = -1*(f1[0]*J1[0][0] + f1[1]*J1[1][0] + f1[2]*J1[2][0]);
-                    tau2[0] = -1*(f2[0]*J2[0][0] + f2[1]*J2[1][0] + f2[2]*J2[2][0]);
-                    tau1[1] = f1[0]*J1[0][1] + f1[1]*J1[1][1] + f1[2]*J1[2][1];
-                    tau2[1] = f2[0]*J2[0][1] + f2[1]*J2[1][1] + f2[2]*J2[2][1];
-                    tau1[2] = -1*(f1[0]*J1[0][2] + f1[1]*J1[1][2] + f1[2]*J1[2][2]);
-                    tau2[2] = -1*(f2[0]*J2[0][2] + f2[1]*J2[1][2] + f2[2]*J2[2][2]);
-                    
-                    KD1[0] = 0.4f*(kd*scaling)*(contact1[0]*J1[0][0]*J1[0][0] + contact1[1]*J1[1][0]*J1[1][0] + contact1[2]*J1[2][0]*J1[2][0]);
-                    KD2[0] = 0.4f*(kd*scaling)*(contact2[0]*J2[0][0]*J2[0][0] + contact2[1]*J2[1][0]*J2[1][0] + contact2[2]*J2[2][0]*J2[2][0]);
-                    KD1[1] = 0.4f*(kd*scaling)*(contact1[0]*J1[0][1]*J1[0][1] + contact1[1]*J1[1][1]*J1[1][1] + contact1[2]*J1[2][1]*J1[2][1]);
-                    KD2[1] = 0.4f*(kd*scaling)*(contact2[0]*J2[0][1]*J2[0][1] + contact2[1]*J2[1][1]*J2[1][1] + contact2[2]*J2[2][1]*J2[2][1]);
-                    KD1[2] = 0.4f*0.44f*(kd*scaling)*(contact1[0]*J1[0][2]*J1[0][2] + contact1[1]*J1[1][2]*J1[1][2] + contact1[2]*J1[2][2]*J1[2][2]);
-                    KD2[2] = 0.4f*0.44f*(kd*scaling)*(contact2[0]*J2[0][2]*J2[0][2] + contact2[1]*J2[1][2]*J2[1][2] + contact2[2]*J2[2][2]*J2[2][2]);
-                    
-                    pack_cmd(&abad1, 0, 0, 0, KD1[0]+.005f, tau1[0]); 
-                    pack_cmd(&abad2, 0, 0, 0, KD2[0]+.005f, tau2[0]); 
-                    pack_cmd(&hip1, 0, 0, 0, KD1[1]+.005f, tau1[1]); 
-                    pack_cmd(&hip2, 0, 0, 0, KD2[1]+.005f, tau2[1]); 
-                    pack_cmd(&knee1, 0, 0, 0, KD1[2]+.0033f, tau1[2]); 
-                    pack_cmd(&knee2, 0, 0, 0, KD2[2]+.0033f, tau2[2]); 
-                    }
-                    break;
-                
-                case 3:
-                {
-                    pack_cmd(&abad1, q2raw[0], dq2raw[0], 2.0f*kp_q*scaling, 2.0f*kd_q*scaling, 0); 
-                    pack_cmd(&abad2, 0, 0, 0, 0, 0); 
-                    pack_cmd(&hip1, q2raw[1], dq2raw[1], 2.0f*kp_q*scaling, 2.0f*kd_q*scaling, 0); 
-                    pack_cmd(&hip2, 0, 0, 0, 0, 0); 
-                    pack_cmd(&knee1, q2raw[2], dq2raw[2], 2.0f*kp_q*scaling, 2.0f*kd_q*scaling, 0); 
-                    pack_cmd(&knee2, 0, 0, 0, 0, 0); 
-                    }
-                    break;
-            //
-            
-            }
-    
 
-            
-            
-            
-            
-            
+    PackAll();
 
-        if(counter>100){
-            //tcmd = -1*tcmd;
-            //printf("%.4f   %.4f  \n\r", q1[1], q2[1]);
-            //printf("%f\n\r", scaling);
-            counter = 0 ;
-            }
-        /*
-        pack_cmd(&abad1, q[0][1], dq[0][1], kp, kd, 0); 
-        pack_cmd(&abad2, q[0][0], dq[0][0], kp, kd, 0); 
-        pack_cmd(&hip1, q[1][1], dq[1][1], kp, kd, 0); 
-        pack_cmd(&hip2, q[1][0], dq[1][0], kp, kd, 0); 
-        pack_cmd(&knee1, q[2][1], dq[2][1], kp/1.5f, kd/2.25f, 0); 
-        pack_cmd(&knee2, q[2][0], dq[2][0], kp/1.5f, kd/2.25f, 0); 
-        */
-    }
-/*
-    pack_cmd(&abad1, 0, 0, 10, .1, 0); 
-    pack_cmd(&abad2, 0, 0, 10, .1, 0); 
-    pack_cmd(&hip1, 0, 0, 10, .1, 0); 
-    pack_cmd(&hip2, 0, 0, 10, .1, 0); 
-    pack_cmd(&knee1, 0, 0, 6.6, .04, 0); 
-    pack_cmd(&knee2, 0, 0, 6.6, .04, 0); 
-*/    
-toggle2 = 0;
+    if(counter>100){
+        printf("%.3f %.3f %.3f   %.3f %.3f %.3f\n\r", l1_state.a.p, l1_state.h.p, l1_state.k.p, l2_state.a.p, l2_state.h.p, l2_state.k.p);
+        counter = 0 ;
+        }
+    
     WriteAll();
+    
     }
+
+
+
     
 void Zero(CANMessage * msg){
     msg->data[0] = 0xFF;
@@ -429,7 +242,7 @@ void EnterMotorMode(CANMessage * msg){
     msg->data[5] = 0xFF;
     msg->data[6] = 0xFF;
     msg->data[7] = 0xFC;
-    WriteAll();
+    //WriteAll();
     }
     
 void ExitMotorMode(CANMessage * msg){
@@ -441,62 +254,51 @@ void ExitMotorMode(CANMessage * msg){
     msg->data[5] = 0xFF;
     msg->data[6] = 0xFF;
     msg->data[7] = 0xFD;
-    WriteAll();
+    //WriteAll();
     }
 void serial_isr(){
      /// handle keyboard commands from the serial terminal ///
      while(pc.readable()){
         char c = pc.getc();
+        //led = !led;
         switch(c){
             case(27):
-                loop.detach();
+                //loop.detach();
                 printf("\n\r exiting motor mode \n\r");
-                ExitMotorMode(&abad1);
-                ExitMotorMode(&abad2);
-                ExitMotorMode(&hip1);
-                ExitMotorMode(&hip2);
-                ExitMotorMode(&knee1);
-                ExitMotorMode(&knee2);
+                ExitMotorMode(&a1_can);
+                ExitMotorMode(&a2_can);
+                ExitMotorMode(&h1_can);
+                ExitMotorMode(&h2_can);
+                ExitMotorMode(&k1_can);
+                ExitMotorMode(&k2_can);
                 enabled = 0;
                 break;
             case('m'):
                 printf("\n\r entering motor mode \n\r");
-                EnterMotorMode(&abad1);
-                Zero(&abad1);
-                EnterMotorMode(&abad2);
-                Zero(&abad2);
-                EnterMotorMode(&hip1);
-                Zero(&hip1);
-                EnterMotorMode(&hip2);
-                Zero(&hip2);
-                EnterMotorMode(&knee1);
-                Zero(&knee1);
-                EnterMotorMode(&knee2);
-                Zero(&knee2);
+                EnterMotorMode(&a1_can);
+                EnterMotorMode(&a2_can);
+                EnterMotorMode(&h1_can);
+                EnterMotorMode(&h2_can);
+                EnterMotorMode(&k1_can);
+                EnterMotorMode(&k2_can);
                 wait(.5);
                 enabled = 1;
-                loop.attach(&sendCMD, .001);
+                //loop.attach(&sendCMD, .001);
+                break;
+            case('s'):
+                printf("\n\r standing \n\r");
+                counter2 = 0;
+                is_standing = 1;
+                //stand();
                 break;
             case('z'):
                 printf("\n\r zeroing \n\r");
-                Zero(&abad1);
-                Zero(&abad2);
-                Zero(&hip1);
-                Zero(&hip2);
-                Zero(&knee1);
-                Zero(&knee2);
-                break;
-            case('0'):
-                control_mode = 0;
-                break;
-            case('1'):
-                control_mode = 1;
-                break;
-            case('2'):
-                control_mode = 2;
-                break;
-            case('3'):
-                control_mode = 3;
+                Zero(&a1_can);
+                Zero(&a2_can);
+                Zero(&h1_can);
+                Zero(&h2_can);
+                Zero(&k1_can);
+                Zero(&k2_can);
                 break;
             }
         }
@@ -504,68 +306,316 @@ void serial_isr(){
         
     }
     
-int can_packet[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+uint32_t xor_checksum(uint32_t* data, size_t len)
+{
+    uint32_t t = 0;
+    for(int i = 0; i < len; i++)   
+        t = t ^ data[i];
+    return t;
+}
+
+void spi_isr(void)
+{
+    GPIOC->ODR |= (1 << 8);
+    GPIOC->ODR &= ~(1 << 8);
+    int bytecount = 0;
+    SPI1->DR = tx_buff[0];
+    while(cs == 0) {
+        if(SPI1->SR&0x1) {
+            rx_buff[bytecount] = SPI1->DR;
+            bytecount++;
+            if(bytecount<TX_LEN) {
+                SPI1->DR = tx_buff[bytecount];
+            }
+        }
+
+    }
+    
+    // after reading, save into spi_command
+    // should probably check checksum first!
+    uint32_t calc_checksum = xor_checksum((uint32_t*)rx_buff,32);
+    for(int i = 0; i < CMD_LEN; i++)
+    {
+        ((uint16_t*)(&spi_command))[i] = rx_buff[i];
+    }
+    
+    // run control, which fills in tx_buff for the next iteration
+    if(calc_checksum != spi_command.checksum){
+        spi_data.flags[1] = 0xdead;}
+        
+    //test_control();
+    //spi_data.q_abad[0] = 12.0f;
+    control();
+    PackAll();
+    WriteAll();
+
+
+    //for (int i = 0; i<TX_LEN; i++) {
+     //   tx_buff[i] = 2*rx_buff[i];
+    //}
+//    for (int i=0; i<TX_LEN; i++) {
+//        //printf("%d ", rx_buff[i]);
+//    }
+    //printf("\n\r");
+}
+
+int softstop_joint(joint_state state, joint_control * control, float limit_p, float limit_n){
+    if((state.p)>=limit_p){
+        //control->p_des = limit_p;
+        control->v_des = 0.0f;
+        control->kp = 0;
+        control->kd = KD_SOFTSTOP;
+        control->t_ff += KP_SOFTSTOP*(limit_p - state.p);
+        return 1;
+    }
+    else if((state.p)<=limit_n){
+        //control->p_des = limit_n;
+        control->v_des = 0.0f;
+        control->kp = 0;
+        control->kd = KD_SOFTSTOP;
+        control->t_ff += KP_SOFTSTOP*(limit_n - state.p);
+        return 1;
+    }
+    return 0;
+    
+    }
+    
+    
+void control()
+{
+    
+    if(((spi_command.flags[0]&0x1)==1)  && (enabled==0)){
+        enabled = 1;
+        EnterMotorMode(&a1_can);
+        can1.write(a1_can);
+        EnterMotorMode(&a2_can);
+        can2.write(a2_can);
+        EnterMotorMode(&k1_can);
+        can1.write(k1_can);
+        EnterMotorMode(&k2_can);
+        can2.write(k2_can);
+        EnterMotorMode(&h1_can);
+        can1.write(h1_can);
+        EnterMotorMode(&h2_can);
+        can2.write(h2_can);
+        printf("e\n\r");
+        return;
+    }
+    else if((((spi_command.flags[0]&0x1))==0)  && (enabled==1)){
+         enabled = 0;
+        ExitMotorMode(&a1_can);
+        can1.write(a1_can);
+        ExitMotorMode(&a2_can);
+        can2.write(a2_can);
+        ExitMotorMode(&h1_can);
+        can1.write(h1_can);
+        ExitMotorMode(&h2_can);
+        can2.write(h2_can);
+        ExitMotorMode(&k1_can);
+        can1.write(k1_can);
+        ExitMotorMode(&k2_can);
+        can2.write(k2_can);
+        printf("x\n\r");
+        return;
+        }
+    
+    spi_data.q_abad[0] = l1_state.a.p;
+    spi_data.q_hip[0] = l1_state.h.p;
+    spi_data.q_knee[0] = l1_state.k.p;
+    spi_data.qd_abad[0] = l1_state.a.v;
+    spi_data.qd_hip[0] = l1_state.h.v;
+    spi_data.qd_knee[0] = l1_state.k.v;
+    
+    spi_data.q_abad[1] = l2_state.a.p;
+    spi_data.q_hip[1] = l2_state.h.p;
+    spi_data.q_knee[1] = l2_state.k.p;
+    spi_data.qd_abad[1] = l2_state.a.v;
+    spi_data.qd_hip[1] = l2_state.h.v;
+    spi_data.qd_knee[1] = l2_state.k.v;
+    
+    
+    
+    if(estop==0){
+        //printf("estopped!!!!\n\r");
+        memset(&l1_control, 0, sizeof(l1_control));
+        memset(&l2_control, 0, sizeof(l2_control));
+        spi_data.flags[0] = 0xdead;
+        spi_data.flags[1] = 0xdead;
+        led = 1;
+        }
+    
+    else{
+        led = 0;
+        
+        memset(&l1_control, 0, sizeof(l1_control));
+        memset(&l2_control, 0, sizeof(l2_control));
+        
+        l1_control.a.p_des = spi_command.q_des_abad[0];
+        l1_control.a.v_des  = spi_command.qd_des_abad[0];
+        l1_control.a.kp = spi_command.kp_abad[0];
+        l1_control.a.kd = spi_command.kd_abad[0];
+        l1_control.a.t_ff = spi_command.tau_abad_ff[0];
+        
+        l1_control.h.p_des = spi_command.q_des_hip[0];
+        l1_control.h.v_des  = spi_command.qd_des_hip[0];
+        l1_control.h.kp = spi_command.kp_hip[0];
+        l1_control.h.kd = spi_command.kd_hip[0];
+        l1_control.h.t_ff = spi_command.tau_hip_ff[0];
+        
+        l1_control.k.p_des = spi_command.q_des_knee[0];
+        l1_control.k.v_des  = spi_command.qd_des_knee[0];
+        l1_control.k.kp = spi_command.kp_knee[0];
+        l1_control.k.kd = spi_command.kd_knee[0];
+        l1_control.k.t_ff = spi_command.tau_knee_ff[0];
+        
+        l2_control.a.p_des = spi_command.q_des_abad[1];
+        l2_control.a.v_des  = spi_command.qd_des_abad[1];
+        l2_control.a.kp = spi_command.kp_abad[1];
+        l2_control.a.kd = spi_command.kd_abad[1];
+        l2_control.a.t_ff = spi_command.tau_abad_ff[1];
+        
+        l2_control.h.p_des = spi_command.q_des_hip[1];
+        l2_control.h.v_des  = spi_command.qd_des_hip[1];
+        l2_control.h.kp = spi_command.kp_hip[1];
+        l2_control.h.kd = spi_command.kd_hip[1];
+        l2_control.h.t_ff = spi_command.tau_hip_ff[1];
+        
+        l2_control.k.p_des = spi_command.q_des_knee[1];
+        l2_control.k.v_des  = spi_command.qd_des_knee[1];
+        l2_control.k.kp = spi_command.kp_knee[1];
+        l2_control.k.kd = spi_command.kd_knee[1];
+        l2_control.k.t_ff = spi_command.tau_knee_ff[1];
+        
+        
+        spi_data.flags[0] = 0;
+        spi_data.flags[1] = 0;
+        spi_data.flags[0] |= softstop_joint(l1_state.a, &l1_control.a, A_LIM_P, A_LIM_N);
+        spi_data.flags[0] |= (softstop_joint(l1_state.h, &l1_control.h, H_LIM_P, H_LIM_N))<<1;
+        //spi_data.flags[0] |= (softstop_joint(l1_state.k, &l1_control.k, K_LIM_P, K_LIM_N))<<2;
+        spi_data.flags[1] |= softstop_joint(l2_state.a, &l2_control.a, A_LIM_P, A_LIM_N);
+        spi_data.flags[1] |= (softstop_joint(l2_state.h, &l2_control.h, H_LIM_P, H_LIM_N))<<1;
+        //spi_data.flags[1] |= (softstop_joint(l2_state.k, &l2_control.k, K_LIM_P, K_LIM_N))<<2;
+        
+        //spi_data.flags[0] = 0xbeef;
+        //spi_data.flags[1] = 0xbeef;
+        //PackAll();
+        //WriteAll();
+    }
+    spi_data.checksum = xor_checksum((uint32_t*)&spi_data,14);
+    for(int i = 0; i < DATA_LEN; i++){
+        tx_buff[i] = ((uint16_t*)(&spi_data))[i];}
+    
+}
+    
+
+void test_control()
+{
+    for(int i = 0; i < 2; i++)
+    {
+        spi_data.q_abad[i] = spi_command.q_des_abad[i] + 1.f;
+        spi_data.q_knee[i] = spi_command.q_des_knee[i] + 1.f;
+        spi_data.q_hip[i]  = spi_command.q_des_hip[i]  + 1.f;
+        
+        spi_data.qd_abad[i] = spi_command.qd_des_abad[i] + 1.f;
+        spi_data.qd_knee[i] = spi_command.qd_des_knee[i] + 1.f;
+        spi_data.qd_hip[i]  = spi_command.qd_des_hip[i]  + 1.f;
+    }
+    
+    spi_data.flags[0] = 0xdead;
+    //spi_data.flags[1] = 0xbeef;
+    
+    // only do first 56 bytes of message.
+    spi_data.checksum = xor_checksum((uint32_t*)&spi_data,14);
+    
+    for(int i = 0; i < DATA_LEN; i++)
+        tx_buff[i] = ((uint16_t*)(&spi_data))[i];
+}
+
+void init_spi(void){
+    SPISlave *spi = new SPISlave(PA_7, PA_6, PA_5, PA_4);
+    spi->format(16, 0);
+    spi->frequency(12000000);
+    spi->reply(0x0);
+    cs.fall(&spi_isr);
+    printf("done\n\r");
+}
+
+    
 int main() {
     //wait(.5);
-    
+    //led = 1;
     pc.baud(921600);
     pc.attach(&serial_isr);
+    estop.mode(PullUp);
+    //spi.format(16, 0);
+    //spi.frequency(1000000);
+    //spi.reply(0x0);
+    //cs.fall(&spi_isr);
+
     can1.frequency(1000000);                     // set bit rate to 1Mbps
-    can1.attach(&rxISR1);                 // attach 'CAN receive-complete' interrupt handler
+    //can1.attach(&rxISR1);                 // attach 'CAN receive-complete' interrupt handler
     can1.filter(CAN_ID<<21, 0xFFE00004, CANStandard, 0); //set up can filter
     can2.frequency(1000000);                     // set bit rate to 1Mbps
-    can2.attach(&rxISR2);                 // attach 'CAN receive-complete' interrupt handler
+    //can2.attach(&rxISR2);                 // attach 'CAN receive-complete' interrupt handler
     can2.filter(CAN_ID<<21, 0xFFE00004, CANStandard, 0); //set up can filter
     
-    printf("\n\r Master\n\r");
-    //printf("%d\n\r", RX_ID << 18);
-    abad1.len = 8;                         //transmit 8 bytes
-    abad2.len = 8;                         //transmit 8 bytes
-    hip1.len = 8;
-    hip2.len = 8;
-    knee1.len = 8;
-    knee2.len = 8;
-    rxMsg1.len = 6;                          //receive 5 bytes
-    rxMsg2.len = 6;                          //receive 5 bytes
-
-
-    abad1.id = 0x1;                        
-    abad2.id = 0x1;                 
-    hip1.id = 0x2;
-    hip2.id = 0x2;
-    knee1.id = 0x3;
-    knee2.id = 0x3;       
-    pack_cmd(&abad1, 0, 0, 0, 0, 0);       //Start out by sending all 0's
-    pack_cmd(&abad2, 0, 0, 0, 0, 0);
-    pack_cmd(&hip1, 0, 0, 0, 0, 0);
-    pack_cmd(&hip2, 0, 0, 0, 0, 0);
-    pack_cmd(&knee1, 0, 0, 0, 0, 0);
-    pack_cmd(&knee2, 0, 0, 0, 0, 0);
-    //WriteAll();
+    memset(&tx_buff, 0, TX_LEN * sizeof(uint16_t));
+    memset(&spi_data, 0, sizeof(spi_data_t));
+    memset(&spi_command,0,sizeof(spi_command_t));
     
-    wait(.5);
-    EnterMotorMode(&abad1);
-    EnterMotorMode(&abad2);
-    EnterMotorMode(&hip1);
-    EnterMotorMode(&hip2);
-    EnterMotorMode(&knee1);
-    EnterMotorMode(&knee2);
-    Zero(&knee2);
-    Zero(&knee1);
-    Zero(&hip1);
-    Zero(&hip2);
-    Zero(&abad2);
-    Zero(&abad1);
+    
+    NVIC_SetPriority(TIM5_IRQn, 1);
+    //NVIC_SetPriority(CAN1_RX0_IRQn, 3);
+    //NVIC_SetPriority(CAN2_RX0_IRQn, 3);
+    
+    printf("\n\r SPIne\n\r");
+    //printf("%d\n\r", RX_ID << 18);
+    
+    a1_can.len = 8;                         //transmit 8 bytes
+    a2_can.len = 8;                         //transmit 8 bytes
+    h1_can.len = 8;
+    h2_can.len = 8;
+    k1_can.len = 8;
+    k2_can.len = 8;
+    rxMsg1.len = 6;                          //receive 6 bytes
+    rxMsg2.len = 6;                          //receive 6 bytes
+
+    a1_can.id = 0x1;                        
+    a2_can.id = 0x1;                 
+    h1_can.id = 0x2;
+    h2_can.id = 0x2;
+    k1_can.id = 0x3;
+    k2_can.id = 0x3;     
+
+    pack_cmd(&a1_can, l1_control.a); 
+    pack_cmd(&a2_can, l2_control.a); 
+    pack_cmd(&h1_can, l1_control.h); 
+    pack_cmd(&h2_can, l2_control.h); 
+    pack_cmd(&k1_can, l1_control.k); 
+    pack_cmd(&k2_can, l2_control.k); 
+    WriteAll();
 
 
-
-    wait(.5);
-    enabled = 1;
-    loop.attach(&sendCMD, .001);
+    // SPI doesn't work if enabled while the CS pin is pulled low
+    // Wait for CS to not be low, then enable SPI
+    if(!spi_enabled){   
+        while((spi_enabled==0) && (cs.read() ==0)){wait_us(10);}
+        init_spi();
+        spi_enabled = 1;
+        }
+            
     while(1) {
-        
+        counter++;
+        can2.read(rxMsg2);
+        unpack_reply(rxMsg2, &l2_state);
+        can1.read(rxMsg1);                    // read message into Rx message storage
+        unpack_reply(rxMsg1, &l1_state);
+        wait_us(10);
 
         }
+        
+
+        
         
     }
     
