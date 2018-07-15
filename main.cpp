@@ -53,8 +53,8 @@ DigitalOut led(PC_5);
 
 
 Serial       pc(PA_2, PA_3);
-CAN          can1(PB_12, PB_13);  // CAN Rx pin name, CAN Tx pin name
-CAN          can2(PB_8, PB_9);  // CAN Rx pin name, CAN Tx pin name
+CAN          can1(PB_12, PB_13, 1000000);  // CAN Rx pin name, CAN Tx pin name
+CAN          can2(PB_8, PB_9, 1000000);  // CAN Rx pin name, CAN Tx pin name
 
 CANMessage   rxMsg1, rxMsg2;
 CANMessage   txMsg1, txMsg2;
@@ -552,10 +552,10 @@ int main() {
     //spi.reply(0x0);
     //cs.fall(&spi_isr);
 
-    can1.frequency(1000000);                     // set bit rate to 1Mbps
+    //can1.frequency(1000000);                     // set bit rate to 1Mbps
     //can1.attach(&rxISR1);                 // attach 'CAN receive-complete' interrupt handler
     can1.filter(CAN_ID<<21, 0xFFE00004, CANStandard, 0); //set up can filter
-    can2.frequency(1000000);                     // set bit rate to 1Mbps
+    //can2.frequency(1000000);                     // set bit rate to 1Mbps
     //can2.attach(&rxISR2);                 // attach 'CAN receive-complete' interrupt handler
     can2.filter(CAN_ID<<21, 0xFFE00004, CANStandard, 0); //set up can filter
     
