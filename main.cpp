@@ -20,8 +20,8 @@
 /// Value Limits ///
  #define P_MIN -12.5f
  #define P_MAX 12.5f
- #define V_MIN -45.0f
- #define V_MAX 45.0f
+ #define V_MIN -65.0f
+ #define V_MAX 65.0f
  #define KP_MIN 0.0f
  #define KP_MAX 500.0f
  #define KD_MIN 0.0f
@@ -67,7 +67,7 @@ Ticker loop;
 
 int spi_enabled = 0;
 InterruptIn cs(PA_4);
-DigitalIn estop(PA_14);
+DigitalIn estop(PB_15);
 //SPISlave spi(PA_7, PA_6, PA_5, PA_4);
 
 
@@ -542,7 +542,7 @@ void init_spi(void){
 
     
 int main() {
-    //wait(.5);
+    wait(1);
     //led = 1;
     pc.baud(921600);
     pc.attach(&serial_isr);
